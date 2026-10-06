@@ -64,3 +64,14 @@ UserSettings/EditorUserSettings.asset~feature_main
 # IDE
 .idea/
 *.slnx
+
+# Setting Editor pribadi (layout & play mode)
+UserSettings/Layouts/default-6000.dwlt
+UserSettings/PlayModeUserSettings.asset
+
+# Folder sementara tool
+.utmp/
+
+# Backup scene lokal (sebelum migrasi device API)
+/[Aa]ssets/[Ss]cenes/[Bb]ackup/
+/[Aa]ssets/[Ss]cenes/[Bb]ackup.meta
