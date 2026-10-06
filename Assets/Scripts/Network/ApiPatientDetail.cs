@@ -307,7 +307,9 @@ public class ApiPatientDetail : MonoBehaviour
     {
         try
         {
-            contentList.content.videoUrl = YoutubeParse.GetYouTubeVideoID(contentData["video_url"]?.ToString());
+            // URL mentah: link YouTube (video_source youtube) atau file MP4 langsung (upload / url).
+            // VideoController yang menentukan cara memutarnya.
+            contentList.content.videoUrl = contentData["video_url"]?.ToString();
         }
         catch (Exception ex)
         {

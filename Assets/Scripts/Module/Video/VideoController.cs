@@ -3,6 +3,7 @@ using System.Collections;
 using System.Collections.Generic;
 using UnityEngine;
 using UnityEngine.Events;
+using UnityEngine.Video;
 using YoutubePlayer.Components;
 
 public class VideoController : MonoBehaviour, IModuleController
@@ -50,9 +51,30 @@ public class VideoController : MonoBehaviour, IModuleController
         }
     }
 
-    public void SetContent(string id)
+    // videoUrl: link YouTube -> diputar lewat Invidious; selain itu (file upload / URL MP4) -> VideoPlayer Unity langsung
+    public void SetContent(string videoUrl)
     {
-        videoPlayer.VideoId = id;
+        string youtubeId = YoutubeParse.GetYouTubeVideoID(videoUrl);
+
+        if (!string.IsNullOrEmpty(youtubeId))
+        {
+            videoPlayer.enabled = true;
+            videoPlayer.VideoId = youtubeId;
+        }
+        else if (!string.IsNullOrWhiteSpace(videoUrl))
+        {
+            // Matikan Invidious sebelum GameObject aktif agar OnEnable-nya tidak meminta API YouTube
+            videoPlayer.enabled = false;
+            VideoPlayer player = videoPlayer.GetComponent<VideoPlayer>();
+            player.source = VideoSource.Url;
+            // Backend bisa mengirim path relatif (/storage/...) untuk video upload
+            player.url = GameEnv.ToAbsoluteUrl(videoUrl).Replace(" ", "%20");
+        }
+        else
+        {
+            Debug.LogError("Konten video tanpa video_url");
+        }
+
         videoPlayer.gameObject.SetActive(true);
     }
 
