@@ -9,8 +9,8 @@ public class DataHandler : MonoBehaviour
     public static DataHandler Instance;
     
     // Data
-    [ShowNonSerializedField] private string _patientSelectedId = "9cc0e94a-dd72-4e70-a8cb-f2fd17ad9dc0";
-    [ShowNonSerializedField] private string _patientSelectedName = "Ade Laksita";
+    [ShowNonSerializedField] private string _patientSelectedId;
+    [ShowNonSerializedField] private string _patientSelectedName;
 
     private void Awake()
     {
@@ -23,6 +23,13 @@ public class DataHandler : MonoBehaviour
         {
             Destroy(gameObject);
         }
+    }
+
+    // Pasien kini ditentukan dari sesi yang di-assign admin ke headset (GET /device/session)
+    public void SetPatientSelected(string id, string namePatient)
+    {
+        if (id != null) SetPatientSelectedId(id);
+        _patientSelectedName = namePatient;
     }
 
     public void SetPatientSelectedId(string id)

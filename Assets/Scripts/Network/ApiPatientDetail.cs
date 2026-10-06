@@ -4,13 +4,16 @@ using System.Collections.Generic;
 using UnityEngine;
 using NaughtyAttributes;
 using Newtonsoft.Json.Linq;
-using UnityEngine.Events;
-using UnityEngine.Serialization;
 
+/// <summary>
+/// Sesi aktif milik headset ini: GET /device/session dan POST /device/session/content/stop.
+/// Format data sama dengan /session/detail/{patientId} lama, jadi parsing konten per type tetap dipakai.
+/// </summary>
 public class ApiPatientDetail : MonoBehaviour
 {
-    [ShowNonSerializedField] private string _url = "";
-    [ShowNonSerializedField] private readonly string _doneContentUrl = GameEnv.BASE_URL + "/session/content/stop";
+    [ShowNonSerializedField] private readonly string _sessionUrl = GameEnv.BASE_URL + "/device/session";
+    [ShowNonSerializedField] private readonly string _doneContentUrl = GameEnv.BASE_URL + "/device/session/content/stop";
+    private const int DoneContentMaxAttempt = 3;
 
     public SessionDetailData sessionDetailData;
     public ContentList contentList;
@@ -19,92 +22,96 @@ public class ApiPatientDetail : MonoBehaviour
 
     private DataHandler _dataHandler;
     public bool IsContentDone { get; private set; }
-    
-    private JObject _savedPostData;
-    
-    public UnityAction OnSessionNotFound;
-    
+
+    // Penanda konten yang terakhir dimuat. Bukan seluruh JSON, karena field seperti actual_duration berubah tiap polling
+    private string _savedSignature;
+
     // Bool
+    public bool HasSession { get; private set; }
     public bool HasContent { get; private set; }
     public bool IsDataIdentical { get; private set; }
-    
+
     public bool IsDoneLoadedContent { get; private set; }
+
+    // Jeda di level SESI (tombol Jeda dashboard / klinik dinonaktifkan). Konten tetap dikirim dengan status running.
+    public bool IsPaused => sessionDetailData.status == "paused";
 
     private void Start()
     {
         _dataHandler = DataHandler.Instance;
     }
-    
+
+    // true sampai respons diterima dan seluruh gambar konten selesai diunduh (atau request gagal)
+    public bool IsFetchingDetail { get; private set; }
+
     public void GetSessionDetail()
     {
-        _url = $"{GameEnv.BASE_URL}/session/detail/{_dataHandler.GetPatientSelectedId()}";
-        apiController.CallApi(_url, HandleSessionDetail, HandleError);
-    }
-    
-    private void HandleError(string errorMessage)
-    {
-#if UNITY_EDITOR
-        Debug.LogError("API Patient Error: " + errorMessage);
-#endif
-        if (errorMessage == "Request failed: HTTP/1.1 404 Not Found")
+        IsFetchingDetail = true;
+        apiController.Get(_sessionUrl, response =>
         {
-            OnSessionNotFound?.Invoke();
-        }
+            if (response.Success)
+            {
+                StartCoroutine(FetchDetailCoroutine(response.Body));
+            }
+            else
+            {
+                IsFetchingDetail = false;
+            }
+        });
     }
 
+    private IEnumerator FetchDetailCoroutine(JObject jsonResponse)
+    {
+        yield return StartCoroutine(HandleSessionDetailCoroutine(jsonResponse));
+        IsFetchingDetail = false;
+    }
+
+    // Polling ringan: hanya cek ada sesi / ada konten berjalan. Juga berfungsi sebagai heartbeat device.
     public void GetNecessaryDetail()
     {
-        _url = $"{GameEnv.BASE_URL}/session/detail/{_dataHandler.GetPatientSelectedId()}";
-        apiController.CallApi(_url, HandleSessionNecessaryDetail, HandleError);
+        apiController.Get(_sessionUrl, response =>
+        {
+            if (response.Success) HandleSessionNecessaryDetail(response.Body);
+        });
+    }
+
+    // session_contents berupa objek: {} jika sesi ada tapi belum ada konten berjalan
+    private static bool IsContentRunning(JObject sessionContents)
+    {
+        return sessionContents != null && sessionContents["id"] != null && sessionContents["id"].Type != JTokenType.Null;
     }
 
     private void HandleSessionNecessaryDetail(JObject jsonResponse)
     {
         try
         {
-            if (jsonResponse == null)
+            // data: null = belum ada sesi yang di-assign ke headset ini
+            JObject sessionData = jsonResponse["data"] as JObject;
+            HasSession = sessionData != null;
+
+            if (sessionData == null)
             {
-                Debug.LogError("Null JSON response");
+                HasContent = false;
                 return;
             }
 
-            bool success = jsonResponse["success"]?.Value<bool>() ?? false;
-            Debug.Log("RUN HANDLE NECESSARY ONLY");
+            sessionDetailData.id = sessionData["id"]?.ToString();
+            ReadSessionMeta(sessionData);
 
-            if (success)
+            if (sessionData["patient"] is JObject patientData)
             {
-                JObject sessionData = (JObject)jsonResponse["data"];
-                if (sessionData != null)
-                {
-                    
-                    sessionDetailData.id = sessionData["id"]?.ToString();
-                    sessionDetailData.status = sessionData["status"]?.ToString();
-
-                    JObject patientData = (JObject)sessionData["patient"];
-                    if (patientData != null)
-                    {
-                        sessionDetailData.patientData.id = patientData["id"]?.ToString();
-                        sessionDetailData.patientData.name = patientData["name"]?.ToString();
-                    }
-
-                    JObject doctorData = (JObject)sessionData["doctor"];
-                    if (doctorData != null)
-                    {
-                        sessionDetailData.doctorData.id = doctorData["id"]?.ToString();
-                        sessionDetailData.doctorData.name = doctorData["name"]?.ToString();
-                    }
-                    
-                    JObject sessionContents = (JObject)sessionData["session_contents"];
-                    if (sessionContents == null || sessionContents.Count == 0)
-                    {
-                        HasContent = false;
-                    }
-                    else
-                    {
-                        HasContent = true;
-                    }
-                }
+                sessionDetailData.patientData.id = patientData["id"]?.ToString();
+                sessionDetailData.patientData.name = patientData["name"]?.ToString();
+                _dataHandler?.SetPatientSelected(sessionDetailData.patientData.id, sessionDetailData.patientData.name);
             }
+
+            if (sessionData["doctor"] is JObject doctorData)
+            {
+                sessionDetailData.doctorData.id = doctorData["id"]?.ToString();
+                sessionDetailData.doctorData.name = doctorData["name"]?.ToString();
+            }
+
+            HasContent = IsContentRunning(sessionData["session_contents"] as JObject);
         }
         catch (Exception ex)
         {
@@ -112,21 +119,37 @@ public class ApiPatientDetail : MonoBehaviour
         }
     }
 
-    private void HandleSessionDetail(JObject jsonResponse)
+    // Status dan jenis sesi diperbarui di setiap polling (juga saat konten sama)
+    private void ReadSessionMeta(JObject sessionData)
     {
-        StartCoroutine(HandleSessionDetailCoroutine(jsonResponse));
+        sessionDetailData.status = ReadString(sessionData["status"]);
+        sessionDetailData.sessionType = ReadString(sessionData["session_type"]);          // pre_clinics | on_clinics | null
+        sessionDetailData.sessionTypeLabel = ReadString(sessionData["session_type_label"]); // Pre-Clinics | On-Clinics | null
+    }
+
+    // JSON null -> null (bukan string kosong / "null")
+    private static string ReadString(JToken token)
+    {
+        return token == null || token.Type == JTokenType.Null ? null : token.ToString();
+    }
+
+    private static string BuildSignature(JObject sessionData)
+    {
+        if (sessionData == null) return "none";
+        JObject sessionContents = sessionData["session_contents"] as JObject;
+        return $"{sessionData["id"]}|{sessionContents?["id"]}|{sessionContents?["content"]?["id"]}";
     }
 
     private IEnumerator HandleSessionDetailCoroutine(JObject jsonResponse)
     {
-        if (jsonResponse == null)
+        // Status sesi selalu diperbarui, termasuk saat konten sama (paused <-> running tanpa ganti konten)
+        if (jsonResponse["data"] is JObject currentSession)
         {
-            Debug.LogError("Null JSON response");
-            yield break;
+            ReadSessionMeta(currentSession);
         }
 
-        bool success = jsonResponse["success"]?.Value<bool>() ?? false;
-        if (JToken.DeepEquals(jsonResponse, _savedPostData))
+        string signature = BuildSignature(jsonResponse["data"] as JObject);
+        if (signature == _savedSignature)
         {
             IsDataIdentical = true;
             yield break;
@@ -134,56 +157,55 @@ public class ApiPatientDetail : MonoBehaviour
 
         IsDataIdentical = false;
         IsContentDone = false;
-        Debug.Log("RUN HANDLE ALL DATA");
+        IsDoneLoadedContent = false;
 
-        _savedPostData = jsonResponse;
+        _savedSignature = signature;
 
-        if (success)
+        JObject sessionData = jsonResponse["data"] as JObject;
+        HasSession = sessionData != null;
+        if (sessionData == null)
         {
-            JObject sessionData = (JObject)jsonResponse["data"];
-            if (sessionData != null)
-            {
-                sessionDetailData.id = sessionData["id"]?.ToString();
-                sessionDetailData.status = sessionData["status"]?.ToString();
+            HasContent = false;
+            yield break;
+        }
 
-                JObject sessionContentData = (JObject)sessionData["session_contents"];
-                if (sessionContentData != null)
-                {
-                    HasContent = true;
-                    contentList.idContent = sessionContentData["id"]?.ToString();
-                    contentList.status = sessionContentData["status"]?.ToString();
-                    contentList.duration = (sessionContentData["duration"] ?? 1).Value<int>() * 60;
+        sessionDetailData.id = sessionData["id"]?.ToString();
+        ReadSessionMeta(sessionData);
 
-                    JObject contentData = (JObject)sessionContentData["content"];
-                    if (contentData != null)
-                    {
-                        contentList.content.id = contentData["id"]?.ToString();
-                        contentList.content.type = contentData["type"]?.ToString();
-                        contentList.content.title = contentData["title"]?.ToString();
-                        contentList.content.description = contentData["description"]?.ToString();
+        JObject sessionContentData = sessionData["session_contents"] as JObject;
+        if (!IsContentRunning(sessionContentData))
+        {
+            HasContent = false;
+            yield break;
+        }
 
-                        switch (contentList.content.type)
-                        {
-                            case "puzzle":
-                                yield return StartCoroutine(HandlePuzzleTypeCoroutine(contentData));
-                                break;
-                            case "quiz":
-                                yield return StartCoroutine(HandleQuizTypeCoroutine(contentData));
-                                break;
-                            case "education":
-                                yield return StartCoroutine(HandleEducationTypeCoroutine(contentData));
-                                break;
-                            case "video":
-                                HandleVideoType(contentData);
-                                break;
-                        }
-                    }
-                }
-                else
-                {
-                    HasContent = false;
-                }
-            }
+        HasContent = true;
+        contentList.idContent = sessionContentData["id"]?.ToString();
+        contentList.status = sessionContentData["status"]?.ToString();
+        contentList.duration = (sessionContentData["duration"] ?? 1).Value<int>() * 60;
+
+        JObject contentData = sessionContentData["content"] as JObject;
+        if (contentData == null) yield break;
+
+        contentList.content.id = contentData["id"]?.ToString();
+        contentList.content.type = contentData["type"]?.ToString();
+        contentList.content.title = contentData["title"]?.ToString();
+        contentList.content.description = contentData["description"]?.ToString();
+
+        switch (contentList.content.type)
+        {
+            case "puzzle":
+                yield return StartCoroutine(HandlePuzzleTypeCoroutine(contentData));
+                break;
+            case "quiz":
+                yield return StartCoroutine(HandleQuizTypeCoroutine(contentData));
+                break;
+            case "education":
+                yield return StartCoroutine(HandleEducationTypeCoroutine(contentData));
+                break;
+            case "video":
+                HandleVideoType(contentData);
+                break;
         }
     }
 
@@ -218,7 +240,7 @@ public class ApiPatientDetail : MonoBehaviour
                             key = choice["key"]?.ToString(),
                             text = choice["text"]?.ToString()
                         };
-                        
+
                         // Yield Image Safe
                         yield return StartCoroutine(apiController.SafeDownloadImage(choice["image_url"]?.ToString(),
                             sprite => choiceData.image = sprite));
@@ -234,7 +256,7 @@ public class ApiPatientDetail : MonoBehaviour
             IsDoneLoadedContent = true;
         }
     }
-    
+
     private IEnumerator HandlePuzzleTypeCoroutine(JObject contentData)
     {
         if (contentData == null)
@@ -242,12 +264,12 @@ public class ApiPatientDetail : MonoBehaviour
             Debug.LogError("Content data is null in HandlePuzzleType");
             yield break;
         }
-        
+
         yield return StartCoroutine(apiController.SafeDownloadImage(contentData["puzzle_image_url"]?.ToString(),
             sprite => contentList.content.puzzleImage = sprite));
-        
+
         contentList.content.puzzleType = contentData["puzzle_dimention"]?.ToString();
-        
+
         IsDoneLoadedContent = true;
     }
 
@@ -265,20 +287,19 @@ public class ApiPatientDetail : MonoBehaviour
 
         contentList.content.description = contentData["description"]?.ToString();
 
-        // Unduh daftar gambar
-        JArray images = contentData["images"] as JArray;
-        if (images != null)
+        // Unduh daftar gambar, urutan dipertahankan (gagal unduh = null di posisinya).
+        // Selalu buat list baru agar gambar konten sebelumnya tidak terbawa.
+        List<Sprite> imagesSprite = new List<Sprite>();
+        if (contentData["images"] is JArray images)
         {
-            List<Sprite> imagesSprite = new List<Sprite>();
             foreach (var image in images)
             {
                 yield return StartCoroutine(apiController.SafeDownloadImage(image["url"]?.ToString(),
                     sprite => imagesSprite.Add(sprite)));
             }
-
-            contentList.content.images = imagesSprite;
         }
-        
+        contentList.content.images = imagesSprite;
+
         IsDoneLoadedContent = true;
     }
 
@@ -292,25 +313,45 @@ public class ApiPatientDetail : MonoBehaviour
         {
             Debug.LogError("Error in HandleVideoType: " + ex.Message);
         }
-        
+
         IsDoneLoadedContent = true;
     }
 
     public void DoneContent()
     {
-        JObject postData = new JObject
-        {
-            ["patient_id"] = _dataHandler.GetPatientSelectedId(),
-            ["session_content_id"] = contentList.idContent
-        };
-        apiController.PostApi(_doneContentUrl, postData, OnContentDone, apiController.HandleError);
         IsDoneLoadedContent = false;
+        StartCoroutine(DoneContentCoroutine(contentList.idContent));
     }
 
-    private void OnContentDone(JObject response)
+    // Endpoint stop idempoten, jadi aman di-retry saat jaringan putus
+    private IEnumerator DoneContentCoroutine(string sessionContentId)
     {
-        bool success = response["success"].Value<bool>();
-        IsContentDone = success;
+        JObject postData = new JObject
+        {
+            ["session_content_id"] = sessionContentId
+        };
+
+        for (int attempt = 1; attempt <= DoneContentMaxAttempt; attempt++)
+        {
+            ApiResponse result = null;
+            apiController.Post(_doneContentUrl, postData, response => result = response);
+            yield return new WaitUntil(() => result != null);
+
+            if (result.Success)
+            {
+                IsContentDone = true;
+                HasContent = false;
+                yield break;
+            }
+
+            if (!result.IsNetworkError && !result.IsRateLimited) break;
+            yield return new WaitForSecondsRealtime(GameEnv.NETWORK_RETRY_INTERVAL);
+        }
+
+        // Konten masih running di server: lupakan respons tersimpan agar konten yang sama ditampilkan ulang
+        Debug.LogError($"Gagal menghentikan konten {sessionContentId}");
+        _savedSignature = null;
+        IsContentDone = false;
         HasContent = false;
     }
 }
@@ -320,8 +361,17 @@ public class SessionDetailData
 {
     public string id;
     public string status;
+    public string sessionType;
+    public string sessionTypeLabel;
     public PatientData patientData;
     public DoctorData doctorData;
+}
+
+[Serializable]
+public class PatientData
+{
+    public string id;
+    public string name;
 }
 
 [Serializable]

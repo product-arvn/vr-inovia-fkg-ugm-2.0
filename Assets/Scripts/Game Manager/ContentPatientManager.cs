@@ -27,29 +27,38 @@ public class ContentPatientManager : MonoBehaviour
     public UnityAction ContentChanged;
     public UnityAction WhenEndContent;
     public UnityAction SessionEnd;
+    // true = sesi sudah di-assign ke headset tetapi belum ada konten berjalan, false = belum ada sesi
+    public UnityAction<bool> WaitingContent;
+    // true = sesi dijeda dari dashboard, false = dilanjutkan
+    public UnityAction<bool> SessionPausedChanged;
+
+    public bool HasActiveContent => _activeContent != null;
+    public string CurrentSessionId => apiPatientDetail.sessionDetailData?.id;
+    public string CurrentSessionTypeLabel => apiPatientDetail.HasSession ? apiPatientDetail.sessionDetailData?.sessionTypeLabel : null;
+
+    private const float EducationCoverMaxSeconds = 5f;
+    // null = belum diketahui: event berikutnya selalu dikirim (dipakai setelah kembali dari nonaktif)
+    private bool? _isSessionPaused = false;
 
     [Header("Api Controller")]
     [SerializeField] private ApiPatientDetail apiPatientDetail;
 
-    private void Start()
-    {
-        apiPatientDetail.OnSessionNotFound += SceneNotFound;
-    }
-
-    private void SceneNotFound()
+    private void SessionEndedFromServer()
     {
         StartCoroutine(ReloadScene());
     }
 
     IEnumerator ReloadScene()
     {
-        yield return new WaitForSeconds(2f);
+        yield return new WaitForSecondsRealtime(2f);
         SessionEnd?.Invoke();
         contentNotFoundPanel.SetActive(true);
-        yield return new WaitForSeconds(2f);
+        yield return new WaitForSecondsRealtime(2f);
         SceneManager.LoadScene(SceneManager.GetActiveScene().name);
     }
 
+    // Loop sesi: GET /device/session tiap SESSION_POLL_INTERVAL detik (sekaligus heartbeat ke dashboard).
+    // Pakai waktu realtime: saat sesi dijeda Time.timeScale = 0, tetapi polling harus tetap jalan.
     public IEnumerator CheckContent()
     {
         while (true)
@@ -58,26 +67,59 @@ public class ContentPatientManager : MonoBehaviour
             {
                 apiPatientDetail.GetNecessaryDetail();
                 HasContent = false;
-                yield return new WaitForSeconds(5f);
+                yield return new WaitForSecondsRealtime(GameEnv.SESSION_POLL_INTERVAL);
+                UpdatePausedState();
+                if (!apiPatientDetail.HasContent) WaitingContent?.Invoke(apiPatientDetail.HasSession);
             }
 
             apiPatientDetail.GetSessionDetail();
-            HasContent = true;
-            
-            while (!apiPatientDetail.IsDoneLoadedContent)
+            yield return new WaitWhile(() => apiPatientDetail.IsFetchingDetail);
+            UpdatePausedState();
+
+            // Konten yang sedang tampil sudah tidak berjalan di server (sesi diakhiri/dihentikan dari dashboard)
+            if (_activeContent != null && !apiPatientDetail.HasContent)
             {
-                yield return new WaitForSeconds(1f);
+                SessionEndedFromServer();
+                yield break;
             }
 
-            if (!apiPatientDetail.IsDataIdentical && apiPatientDetail.HasContent)
+            if (!apiPatientDetail.IsDataIdentical && apiPatientDetail.HasContent && apiPatientDetail.IsDoneLoadedContent)
             {
-                yield return new WaitForSeconds(1f);
+                yield return new WaitForSecondsRealtime(1f);
+                HasContent = true;
                 SetContent();
                 ContentChanged?.Invoke();
                 isContentDone = false;
             }
 
-            yield return new WaitForSeconds(5f);
+            yield return new WaitForSecondsRealtime(GameEnv.SESSION_POLL_INTERVAL);
+        }
+    }
+
+    private void UpdatePausedState()
+    {
+        bool paused = apiPatientDetail.HasSession && apiPatientDetail.IsPaused;
+        if (_isSessionPaused == paused) return;
+        _isSessionPaused = paused;
+        SessionPausedChanged?.Invoke(paused);
+    }
+
+    public void ResetPausedState()
+    {
+        _isSessionPaused = null;
+    }
+
+    // Bekukan konten tanpa menutupnya: timer modul memakai Time.deltaTime, video & audio dijeda terpisah
+    public void SetFrozen(bool frozen)
+    {
+        Time.timeScale = frozen ? 0f : 1f;
+        AudioListener.pause = frozen;
+
+        if (_activeContent == null) return;
+        foreach (var player in _activeContent.GetComponentsInChildren<UnityEngine.Video.VideoPlayer>(true))
+        {
+            if (frozen) player.Pause();
+            else if (player.isPrepared) player.Play();
         }
     }
     
