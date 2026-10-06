@@ -7,7 +7,8 @@ using UnityEngine.Events;
 public class EducationController : MonoBehaviour, IModuleController
 {
     private string _title;
-    private float _duration;
+    private float _duration;       // detik per slide
+    private float _coverDuration;  // detik untuk cover
     private List<EducationData> _educationData = new List<EducationData>();
     private EducationData _educationDataCover = new EducationData();
     [SerializeField] private EducationModulView educationModulView;
@@ -34,7 +35,7 @@ public class EducationController : MonoBehaviour, IModuleController
     private IEnumerator Start()
     {
         _globalTimer = FindObjectOfType<GlobalTimer>();
-        coverTimerTrigger.SetTimer(_duration);
+        coverTimerTrigger.SetTimer(_coverDuration);
         contentTimerTrigger.SetTimer(_duration);
         
         // Add Event
@@ -74,9 +75,10 @@ public class EducationController : MonoBehaviour, IModuleController
         _educationDataCover.image = image;
     }
 
-    public void SetDuration(int time)
+    public void SetDuration(float slideSeconds, float coverSeconds)
     {
-        _duration = time;
+        _duration = slideSeconds;
+        _coverDuration = coverSeconds;
     }
 
     public void SetHeader(string title, string creator)

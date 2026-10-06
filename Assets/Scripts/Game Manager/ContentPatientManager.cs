@@ -238,24 +238,32 @@ public class ContentPatientManager : MonoBehaviour
     {
         _activeContent = Instantiate(educationController.gameObject, contentParent);
         EducationController education = _activeContent.GetComponent<EducationController>();
-        List<string> contents = new List<string>(apiPatientDetail.contentList.content.description.Split(new []{ "\r\n" }, StringSplitOptions.None));
+        Content content = apiPatientDetail.contentList.content;
 
-        for (int i = 0; i < contents.Count; i++)
+        // Satu slide per gambar; paragraf deskripsi ke-i menjadi teks slide ke-i.
+        // Baris kosong dibuang dan \r\n maupun \n diterima.
+        List<string> paragraphs = new List<string>();
+        foreach (string line in (content.description ?? "").Split(new[] { "\r\n", "\n", "\r" }, StringSplitOptions.RemoveEmptyEntries))
         {
-            if (string.IsNullOrWhiteSpace(contents[i]))
-            {
-                continue;
-            }
-            
-            education.AddEducationData(contents[i],
-                i < apiPatientDetail.contentList.content.images.Count
-                    ? apiPatientDetail.contentList.content.images[i]
-                    : null);
+            if (!string.IsNullOrWhiteSpace(line)) paragraphs.Add(line.Trim());
         }
-        
-        education.SetEducationCover(apiPatientDetail.contentList.content.title, apiPatientDetail.contentList.content.coverSprite);
-        education.SetHeader(apiPatientDetail.contentList.content.title, apiPatientDetail.sessionDetailData.doctorData.name);
-        education.SetDuration(apiPatientDetail.contentList.duration / contents.Count);
+
+        List<Sprite> images = content.images ?? new List<Sprite>();
+        int slideCount = Mathf.Max(1, Mathf.Max(images.Count, paragraphs.Count));
+
+        for (int i = 0; i < slideCount; i++)
+        {
+            education.AddEducationData(i < paragraphs.Count ? paragraphs[i] : "", i < images.Count ? images[i] : null);
+        }
+
+        // Seluruh modul (cover + semua slide) muat dalam durasi yang diatur dokter
+        float totalSeconds = Mathf.Max(1, apiPatientDetail.contentList.duration);
+        float coverSeconds = Mathf.Clamp(totalSeconds / (slideCount + 1), 1f, EducationCoverMaxSeconds);
+        float slideSeconds = Mathf.Max(1f, (totalSeconds - coverSeconds) / slideCount);
+
+        education.SetEducationCover(content.title, content.coverSprite);
+        education.SetHeader(content.title, apiPatientDetail.sessionDetailData.doctorData.name);
+        education.SetDuration(slideSeconds, coverSeconds);
         education.OnEducationDone += () => Destroy(education.gameObject);
         education.OnEducationDone += () => apiPatientDetail.DoneContent();
         education.OnEducationDone += () => WhenEndContent?.Invoke();
